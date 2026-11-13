@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# fitdesktop: undo xfwm4 desktop zoom (Alt + mouse wheel) so the whole desktop fits the screen.
+#
+# The zoom lives in the xfwm4 compositor, so switching compositing off and back on
+# resets it to 1:1. Nothing else is changed.
+
+set -u
+
+prop=(-c xfwm4 -p /general/use_compositing)
+
+# Report to the terminal, or as a desktop notification when started from a shortcut.
+say() {
+    if [ -t 2 ]; then echo "fitdesktop: $*" >&2
+    else notify-send fitdesktop "$*" 2>/dev/null || echo "fitdesktop: $*" >&2; fi
+}
+
+# Switch compositing back on, retrying, and confirm by reading it back.
+restore() {
+    trap '' INT TERM HUP    # a second Ctrl-C must not abort the restore itself
+    local i
+    for i in 1 2 3 4 5; do
+        xfconf-query "${prop[@]}" -s true &&
+            [ "$(xfconf-query "${prop[@]}" 2>/dev/null)" = true ] && return 0
+        sleep 1
+    done
+    say "compositing did not come back on; run: xfconf-query -c xfwm4 -p /general/use_compositing -s true"
+    return 1
+}
+
+if ! command -v xfconf-query >/dev/null 2>&1; then
+    say "xfconf-query not found (is this an XFCE session?)"
+    exit 1
+fi
+
+# One run at a time: a second run during the off window would read "false".
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/fitdesktop.$(id -u).lock"
+flock -n 9 || exit 0
+
+if ! state=$(xfconf-query "${prop[@]}" 2>&1); then
+    say "cannot read xfwm4 settings: $state"
+    exit 1
+fi
+if [ "$state" != "true" ]; then
+    echo "fitdesktop: compositing is off, so the desktop cannot be zoomed. Nothing to do."
+    exit 0
+fi
+if ! pgrep -u "$(id -u)" -x xfwm4 >/dev/null; then
+    say "xfwm4 is not running, so there is no zoom to reset."
+    exit 1
+fi
+
+# Whatever happens below, never leave compositing switched off.
+trap 'restore' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+xfconf-query "${prop[@]}" -s false || { say "could not switch compositing off"; exit 1; }
+sleep 0.5
+# Keep the EXIT trap armed while restoring, so a signal here still restores.
+if ! restore; then trap - EXIT; exit 1; fi
+trap - EXIT
+echo "fitdesktop: compositing restarted, zoom is back to 1:1."
